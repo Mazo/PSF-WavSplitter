@@ -28,15 +28,29 @@ namespace PSF_WavSplitter
 
                 var idxLocationArgument = command.Argument("IDXLocation", "The full path of the IDX file to use");
                 var wavLocationArgument = command.Argument("WAVLocation", "The full path of the WAV file to use");
-                var outputLocationArgument = command.Argument("OutputLocation", "The folder to output split wavs to (with trailing slash)");
+                var outputLocationArgument = command.Argument("OutputLocation", "The folder to output split wavs to (with trailing slash - folder must exist)");
 
                 command.OnExecute(() =>
                 {
                     var idxLocation = idxLocationArgument.Value ?? throw new Exception("Must specify IDX location (absolute path)");
                     var wavLocation = wavLocationArgument.Value ?? throw new Exception("Must specify WAV location (absolute path)");
-                    var outputLocation = outputLocationArgument.Value ?? throw new Exception("Must specify output location (with trailing slash)");
+                    var outputLocation = outputLocationArgument.Value ?? throw new Exception("Must specify output location (with trailing slash - folder must exist)");
 
                     var idxData = LoadIdxFile(idxLocation);
+
+                    // For anyone that's curious, this site was extremely helpful with working out the format of the wav file, even though it isn't an exact match.
+                    // https://blogs.msdn.microsoft.com/dawate/2009/06/23/intro-to-audio-programming-part-2-demystifying-the-wav-format/
+
+                    // Pull out the FMT header bytes from the original file to reuse for each new wav
+                    IEnumerable<byte> fmtHeaderBytes;
+                    using (FileStream fileStream = new FileStream(wavLocation, FileMode.Open, FileAccess.Read))
+                    {
+                        fileStream.Seek(16, SeekOrigin.Begin); // Seeking forward 16 bytes leaves us right at the end of the beginning "fmt " header
+                        var buffer = new byte[24]; // 24 bytes is just enough to get the fmt headers and to the end of the "data" marker
+                        fileStream.Read(buffer, 0, buffer.Length);
+                        fmtHeaderBytes = buffer;
+                        fileStream.Close();
+                    }
 
                     int i = 0;
                     foreach (var row in idxData)
@@ -45,21 +59,24 @@ namespace PSF_WavSplitter
                         using (FileStream fileStream = new FileStream(wavLocation, FileMode.Open, FileAccess.Read))
                         {
                             var buffer = new byte[row.Length];
-                            fileStream.Seek(row.StartByte, SeekOrigin.Begin);
+                            var start = i == 0 ? row.StartByte + 38 : row.StartByte; // If this is the first wav written we need to skip over the pre-existing header or it'll be duplicated.
+                            fileStream.Seek(start, SeekOrigin.Begin);
                             fileStream.Read(buffer, 0, buffer.Length);
 
                             using (var fs = new FileStream(outputLocation + row.Name, FileMode.Create, FileAccess.Write))
                             {
                                 
-                                IEnumerable<byte> fmtBytes = StringToByteArray("1000000001000100112B0000112B000001000800");
                                 IEnumerable<byte> headerBytes = Encoding.ASCII.GetBytes("RIFF")
-                                    .Concat(BitConverter.GetBytes(row.Length))
+                                    .Concat(BitConverter.GetBytes(row.Length - 8)) // Remove 8 bytes as RIFF & WAVE headers shouldn't be included in total size
                                     .Concat(Encoding.ASCII.GetBytes("WAVEfmt "))
-                                    .Concat(fmtBytes)
-                                    .Concat(Encoding.ASCII.GetBytes("data"))
-                                    .Concat(BitConverter.GetBytes(row.Length));
-                                fs.Write(headerBytes.ToArray(), 0, headerBytes.Count());
-                                fs.Write(buffer, 0, buffer.Length);
+                                    .Concat(fmtHeaderBytes);
+
+                                var headerBytesCount = headerBytes.Count();
+
+                                headerBytes = headerBytes.Concat(BitConverter.GetBytes(row.Length - headerBytesCount - 4)); // Remove the existing header length (including this itself) from the total bytes to get the actual data length
+
+                                fs.Write(headerBytes.ToArray(), 0, headerBytes.Count()); // Write out the headers
+                                fs.Write(buffer, 0, buffer.Length); // Write the rest of the data
                                 fs.Close();
                             }
 
